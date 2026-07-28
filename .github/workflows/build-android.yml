@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -16,37 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore and verify converter source
+      - name: Verify converter source
         shell: bash
         run: |
-          mkdir -p app/src/main/java/com/openai/m3u8zipmp4
-          if compgen -G ".bootstrap/ConverterService.java.b64.*" > /dev/null; then
-            cat .bootstrap/ConverterService.java.b64.* | tr -d '\r\n ' | base64 -d > app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
-            echo "b25aaf718e8b582b4ab8d7c0407ddfca9a45b9404fa88d81fbdf6fe5b7038c64  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
-          else
-            test -f app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
-            echo "c63d4320162f24e116a597e2ac1d3459aefaca83f8becd12c3df1b6595fd4854  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
-          fi
-
-      - name: Apply source fix
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java')
-          text = path.read_text(encoding='utf-8')
-          if 'private void checkCancelled()' not in text:
-              marker = '    @Override public IBinder onBind(Intent intent)'
-              method = '''    private void checkCancelled() throws CancelledException {
-                  if (cancelled || Thread.currentThread().isInterrupted()) throw new CancelledException();
-              }
-
-          '''
-              if marker not in text:
-                  raise SystemExit('Unable to locate insertion point for checkCancelled')
-              text = text.replace(marker, method + marker, 1)
-              path.write_text(text, encoding='utf-8')
-          PY
+          test -f app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
+          echo "c63d4320162f24e116a597e2ac1d3459aefaca83f8becd12c3df1b6595fd4854  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
 
       - uses: actions/setup-java@v4
         with:
@@ -115,14 +89,3 @@ jobs:
           path: M3U8-ZIP-to-MP4-v3.apk
           if-no-files-found: error
           retention-days: 30
-
-      - name: Replace bootstrap chunks with source
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('.bootstrap/ConverterService.java.b64.*') != ''
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
-          git rm -r .bootstrap
-          git commit -m "Add converter service source"
-          git push
