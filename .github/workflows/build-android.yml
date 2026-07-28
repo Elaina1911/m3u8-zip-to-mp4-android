@@ -26,6 +26,26 @@ jobs:
           test -f app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
           echo "b25aaf718e8b582b4ab8d7c0407ddfca9a45b9404fa88d81fbdf6fe5b7038c64  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
 
+      - name: Apply source fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java')
+          text = path.read_text(encoding='utf-8')
+          if 'private void checkCancelled()' not in text:
+              marker = '    @Override public IBinder onBind(Intent intent)'
+              method = '''    private void checkCancelled() throws CancelledException {
+                  if (cancelled || Thread.currentThread().isInterrupted()) throw new CancelledException();
+              }
+
+          '''
+              if marker not in text:
+                  raise SystemExit('Unable to locate insertion point for checkCancelled')
+              text = text.replace(marker, method + marker, 1)
+              path.write_text(text, encoding='utf-8')
+          PY
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
