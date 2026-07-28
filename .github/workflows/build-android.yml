@@ -41,7 +41,34 @@ jobs:
           gradle-version: '8.11.1'
 
       - name: Build release APK
-        run: gradle :app:assembleRelease --stacktrace
+        shell: bash
+        run: |
+          set +e
+          gradle :app:assembleRelease --stacktrace 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          echo "$code" > build-exit-code.txt
+          exit 0
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-build-diagnostics
+          path: |
+            build.log
+            build-exit-code.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop on build failure
+        shell: bash
+        run: |
+          code=$(cat build-exit-code.txt)
+          if [ "$code" != "0" ]; then
+            echo "Android build failed with exit code $code"
+            grep -nE "(^|[[:space:]])(error:|FAILURE:|What went wrong:|Execution failed for task|Caused by:)" build.log | tail -n 120 || true
+            exit "$code"
+          fi
 
       - name: Create temporary signing key
         run: |
