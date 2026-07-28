@@ -22,9 +22,11 @@ jobs:
           mkdir -p app/src/main/java/com/openai/m3u8zipmp4
           if compgen -G ".bootstrap/ConverterService.java.b64.*" > /dev/null; then
             cat .bootstrap/ConverterService.java.b64.* | tr -d '\r\n ' | base64 -d > app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
+            echo "b25aaf718e8b582b4ab8d7c0407ddfca9a45b9404fa88d81fbdf6fe5b7038c64  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
+          else
+            test -f app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
+            echo "c63d4320162f24e116a597e2ac1d3459aefaca83f8becd12c3df1b6595fd4854  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
           fi
-          test -f app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
-          echo "b25aaf718e8b582b4ab8d7c0407ddfca9a45b9404fa88d81fbdf6fe5b7038c64  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
 
       - name: Apply source fix
         shell: bash
