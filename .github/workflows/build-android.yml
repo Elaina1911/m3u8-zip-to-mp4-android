@@ -1,0 +1,79 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore and verify converter source
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/com/openai/m3u8zipmp4
+          if compgen -G ".bootstrap/ConverterService.java.b64.*" > /dev/null; then
+            cat .bootstrap/ConverterService.java.b64.* | tr -d '\r\n ' | base64 -d > app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
+          fi
+          test -f app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
+          echo "b25aaf718e8b582b4ab8d7c0407ddfca9a45b9404fa88d81fbdf6fe5b7038c64  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: yes | sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build release APK
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Create temporary signing key
+        run: |
+          keytool -genkeypair -v -keystore release.jks -storepass android -keypass android \
+            -alias release -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=M3U8 ZIP MP4, OU=Local Build, O=Elaina1911, L=Singapore, ST=Singapore, C=SG"
+
+      - name: Sign and verify APK
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            M3U8-ZIP-to-MP4-v3-aligned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks release.jks --ks-pass pass:android --key-pass pass:android \
+            --out M3U8-ZIP-to-MP4-v3.apk M3U8-ZIP-to-MP4-v3-aligned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
+            M3U8-ZIP-to-MP4-v3.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: M3U8-ZIP-to-MP4-Android-v3
+          path: M3U8-ZIP-to-MP4-v3.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Replace bootstrap chunks with source
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('.bootstrap/ConverterService.java.b64.*') != ''
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
+          git rm -r .bootstrap
+          git commit -m "Add converter service source"
+          git push
