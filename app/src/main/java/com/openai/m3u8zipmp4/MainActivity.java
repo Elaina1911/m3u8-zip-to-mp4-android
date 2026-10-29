@@ -32,7 +32,7 @@ public class MainActivity extends Activity {
     private static final int MODE_URL = 0;
     private static final int MODE_ZIP = 1;
 
-    private EditText urlInput, nameInput, refererInput, cookieInput, userAgentInput;
+    private EditText urlInput, audioUrlInput, nameInput, refererInput, cookieInput, userAgentInput;
     private TextView status, selectedZipText, modeUrl, modeZip;
     private ProgressBar progress;
     private Button startButton, cancelButton, advancedButton, chooseZipButton, openButton;
@@ -131,6 +131,9 @@ public class MainActivity extends Activity {
         urlBox.addView(labelWithTop("M3U8 链接"));
         urlInput = edit("https://example.com/video/index.m3u8", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         urlBox.addView(urlInput);
+        urlBox.addView(labelWithTop("独立音频 M3U8（可选）"));
+        audioUrlInput = edit("https://example.com/audio/index.m3u8（留空则自动识别）", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        urlBox.addView(audioUrlInput);
         advancedButton = button("高级设置（Referer / Cookie）", false);
         advancedButton.setOnClickListener(v -> toggleAdvanced());
         urlBox.addView(advancedButton);
@@ -194,7 +197,7 @@ public class MainActivity extends Activity {
         status.setLineSpacing(0, 1.3f);
         card.addView(status);
 
-        TextView notes = text("链接模式支持普通 HLS 点播、主播放列表、相对地址和 AES-128。ZIP 模式会读取包内 m3u8，并自动匹配数字分片；没有播放列表时按自然顺序合并。SAMPLE-AES、Widevine 等 DRM 不会绕过。", 13, "#667085");
+        TextView notes = text("链接模式支持普通 HLS 点播、主播放列表、独立音视频轨、相对地址和 AES-128。主列表声明独立音轨时会自动识别；也可以手动填写独立音频 M3U8。ZIP 模式会读取包内 m3u8 并自动匹配分片。SAMPLE-AES、Widevine 等 DRM 不会绕过。", 13, "#667085");
         notes.setLineSpacing(0, 1.45f);
         LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
         np.topMargin = dp(18);
@@ -256,6 +259,12 @@ public class MainActivity extends Activity {
                 return;
             }
             i.putExtra("url", url);
+            String audioUrl = audioUrlInput.getText().toString().trim();
+            if (!audioUrl.isEmpty() && !(audioUrl.startsWith("http://") || audioUrl.startsWith("https://"))) {
+                Toast.makeText(this, "独立音频地址必须是有效的 http/https m3u8 地址", Toast.LENGTH_LONG).show();
+                return;
+            }
+            i.putExtra("audioUrl", audioUrl);
             i.putExtra("referer", refererInput.getText().toString().trim());
             i.putExtra("cookie", cookieInput.getText().toString().trim());
             i.putExtra("ua", userAgentInput.getText().toString().trim());
