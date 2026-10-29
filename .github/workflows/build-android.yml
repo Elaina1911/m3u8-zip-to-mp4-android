@@ -64,26 +64,43 @@ jobs:
             exit "$code"
           fi
 
-      - name: Create temporary signing key
+      - name: Restore fixed release signing key
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+        shell: bash
         run: |
-          keytool -genkeypair -v -keystore release.jks -storepass android -keypass android \
-            -alias release -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=M3U8 ZIP MP4, OU=Local Build, O=Elaina1911, L=Singapore, ST=Singapore, C=SG"
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ] || [ -z "$RELEASE_KEYSTORE_PASSWORD" ]; then
+            echo "::error::Missing fixed Android signing secrets. Configure ANDROID_RELEASE_KEYSTORE_BASE64 and ANDROID_RELEASE_KEYSTORE_PASSWORD in repository Actions secrets."
+            exit 1
+          fi
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > release.jks
+          keytool -list -keystore release.jks \
+            -storepass "$RELEASE_KEYSTORE_PASSWORD" \
+            -alias m3u8zipmp4 >/dev/null
 
       - name: Sign and verify APK
+        env:
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+        shell: bash
         run: |
+          VERSION_NAME=$(grep -oP 'versionName\s+"\K[^"]+' app/build.gradle)
+          APK_NAME="M3U8-ZIP-to-MP4-v${VERSION_NAME}"
+          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f 4 \
             app/build/outputs/apk/release/app-release-unsigned.apk \
-            M3U8-ZIP-to-MP4-v4-aligned.apk
+            "$APK_NAME-aligned.apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-            --ks release.jks --ks-pass pass:android --key-pass pass:android \
-            --out M3U8-ZIP-to-MP4-v4.apk M3U8-ZIP-to-MP4-v4-aligned.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
-            M3U8-ZIP-to-MP4-v4.apk
+            --ks release.jks \
+            --ks-key-alias m3u8zipmp4 \
+            --ks-pass "pass:$RELEASE_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$RELEASE_KEYSTORE_PASSWORD" \
+            --out "$APK_NAME.apk" "$APK_NAME-aligned.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK_NAME.apk"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: M3U8-ZIP-to-MP4-Android-v4
-          path: M3U8-ZIP-to-MP4-v4.apk
+          name: M3U8-ZIP-to-MP4-Android-${{ env.APK_NAME }}
+          path: ${{ env.APK_NAME }}.apk
           if-no-files-found: error
           retention-days: 30
