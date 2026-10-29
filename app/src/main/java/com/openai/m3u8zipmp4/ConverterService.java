@@ -65,57 +65,58 @@ public class ConverterService extends Service {
         userAgent = nvl(intent.getStringExtra("ua"));
         if (userAgent.isEmpty()) userAgent = "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome Mobile Safari/537.36";
         String url = nvl(intent.getStringExtra("url"));
+        String audioUrl = nvl(intent.getStringExtra("audioUrl"));
         String zipUri = nvl(intent.getStringExtra("zipUri"));
         String zipName = nvl(intent.getStringExtra("zipName"));
 
         startForeground(NOTIFICATION_ID, makeNotification("正在准备…", 0, true, true));
         worker = new Thread(() -> {
             if ("zip".equals(mode)) runZipJob(zipUri, zipName, requestedName);
-            else runUrlJob(url, requestedName);
+            else runUrlJob(url, audioUrl, requestedName);
         }, "video-converter");
         worker.start();
         return START_NOT_STICKY;
     }
 
-    private void runUrlJob(String url, String requestedName) {
+    private void runUrlJob(String url, String manualAudioUrl, String requestedName) {
         File workDir = new File(getCacheDir(), "url_" + System.currentTimeMillis());
-        File combined = new File(workDir, "combined.bin");
+        File videoCombined = new File(workDir, "video_source.bin");
+        File audioCombined = new File(workDir, "audio_source.bin");
         File output = new File(workDir, "output.mp4");
         workDir.mkdirs();
         try {
             acquireWakeLock();
-            updateProgress(-1, "正在读取播放列表…");
-            MediaPlaylist playlist = loadRemotePlaylist(url, 0);
-            checkCancelled();
-            if (!playlist.endList) throw new IOException("检测到直播播放列表。当前版本仅支持带 #EXT-X-ENDLIST 的点播视频。");
-            if (playlist.segments.isEmpty()) throw new IOException("播放列表中没有找到视频分片。");
-            if (playlist.hasByteRange) throw new IOException("当前版本暂不支持 #EXT-X-BYTERANGE 分片。");
+            updateProgress(-1, "正在读取视频播放列表…");
+            MediaPlaylist videoPlaylist = loadRemotePlaylist(url, 0);
+            validateRemotePlaylist(videoPlaylist, "视频");
 
-            updateProgress(3, "已找到 " + playlist.segments.size() + " 个分片");
-            Boolean fmp4 = null;
-            Map<String, byte[]> keyCache = new HashMap<>();
-            try (BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(combined), 1024 * 1024)) {
-                if (playlist.initUrl != null) out.write(downloadWithRetry(playlist.initUrl, 3));
-                for (int i = 0; i < playlist.segments.size(); i++) {
-                    checkCancelled();
-                    Segment seg = playlist.segments.get(i);
-                    byte[] data = downloadWithRetry(seg.url, 3);
-                    if (seg.key != null) data = decryptRemote(data, seg.key, playlist.mediaSequence + i, keyCache);
-                    if (fmp4 == null) fmp4 = detectFragmentType(data);
-                    out.write(data);
-                    int p = 4 + (int) (((i + 1L) * 76L) / playlist.segments.size());
-                    updateProgress(p, "正在下载分片 " + (i + 1) + "/" + playlist.segments.size());
-                }
-            }
-            checkCancelled();
-            if (Boolean.TRUE.equals(fmp4)) {
-                if (playlist.initUrl == null && !fileContainsBox(combined, "moov"))
-                    throw new IOException("分段 MP4 缺少 #EXT-X-MAP 初始化片段，无法生成可播放 MP4。");
-                updateProgress(84, "正在整理分段 MP4…");
-                copyFile(combined, output);
+            String audioUrl = manualAudioUrl == null ? "" : manualAudioUrl.trim();
+            if (audioUrl.isEmpty()) audioUrl = nvl(videoPlaylist.audioPlaylistUrl);
+
+            if (!audioUrl.isEmpty()) {
+                updateProgress(-1, manualAudioUrl != null && !manualAudioUrl.trim().isEmpty()
+                        ? "检测到手动指定的独立音频，正在读取…"
+                        : "检测到独立音频轨，正在读取…");
+                MediaPlaylist audioPlaylist = loadRemotePlaylist(audioUrl, 0);
+                validateRemotePlaylist(audioPlaylist, "音频");
+
+                downloadPlaylistToFile(videoPlaylist, videoCombined, false, 3, 48, "视频");
+                checkCancelled();
+                downloadPlaylistToFile(audioPlaylist, audioCombined, true, 52, 28, "音频");
+                checkCancelled();
+
+                updateProgress(82, "正在合并视频轨和音频轨…");
+                muxSeparateAv(videoCombined, audioCombined, output);
             } else {
-                updateProgress(82, "正在无损封装为 MP4…");
-                remuxTsToMp4(combined, output);
+                String kind = downloadPlaylistToFile(videoPlaylist, videoCombined, false, 3, 77, "视频");
+                checkCancelled();
+                if ("mp4".equals(kind)) {
+                    updateProgress(84, "正在整理分段 MP4…");
+                    copyFile(videoCombined, output);
+                } else {
+                    updateProgress(82, "正在无损封装为 MP4…");
+                    remuxTsToMp4(videoCombined, output);
+                }
             }
             finishSuccess(output, requestedName, "M3U8");
         } catch (CancelledException e) {
@@ -125,6 +126,41 @@ public class ConverterService extends Service {
         } finally {
             cleanup(workDir);
         }
+    }
+
+    private void validateRemotePlaylist(MediaPlaylist playlist, String label) throws IOException {
+        if (playlist == null) throw new IOException(label + "播放列表解析失败。");
+        if (!playlist.endList) throw new IOException("检测到" + label + "直播播放列表。当前版本仅支持带 #EXT-X-ENDLIST 的点播视频。");
+        if (playlist.segments.isEmpty()) throw new IOException(label + "播放列表中没有找到媒体分片。");
+        if (playlist.hasByteRange) throw new IOException(label + "播放列表使用 #EXT-X-BYTERANGE，当前版本暂不支持。");
+    }
+
+    private String downloadPlaylistToFile(MediaPlaylist playlist, File target, boolean audioOnly,
+                                          int progressStart, int progressSpan, String label) throws Exception {
+        String kind = null;
+        Map<String, byte[]> keyCache = new HashMap<>();
+        try (BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(target), 1024 * 1024)) {
+            if (playlist.initUrl != null) out.write(downloadWithRetry(playlist.initUrl, 3));
+            for (int i = 0; i < playlist.segments.size(); i++) {
+                checkCancelled();
+                Segment seg = playlist.segments.get(i);
+                byte[] data = downloadWithRetry(seg.url, 3);
+                if (seg.key != null) data = decryptRemote(data, seg.key, playlist.mediaSequence + i, keyCache);
+                if (kind == null) {
+                    if (looksLikeTs(data)) kind = "ts";
+                    else if (looksLikeMp4(data)) kind = "mp4";
+                    else if (audioOnly && looksLikePackedAudio(data)) kind = "audio";
+                    else throw new IOException("无法识别" + label + "分片格式。");
+                }
+                out.write(data);
+                int p = progressStart + (int) (((i + 1L) * progressSpan) / playlist.segments.size());
+                updateProgress(p, "正在下载" + label + "分片 " + (i + 1) + "/" + playlist.segments.size());
+            }
+        }
+        if ("mp4".equals(kind) && playlist.initUrl == null && !fileContainsBox(target, "moov")) {
+            throw new IOException(label + "分段 MP4 缺少 #EXT-X-MAP 初始化片段，无法生成可播放媒体。");
+        }
+        return kind == null ? "" : kind;
     }
 
     private void runZipJob(String uriText, String zipDisplayName, String requestedName) {
@@ -398,21 +434,47 @@ public class ConverterService extends Service {
         if (!text.contains("#EXTM3U")) throw new IOException("地址返回的内容不是有效 m3u8。");
         String[] lines = text.replace("\r", "").split("\n");
         List<Variant> variants = new ArrayList<>();
+        List<AudioRendition> audioRenditions = new ArrayList<>();
+
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i].trim();
-            if (line.startsWith("#EXT-X-STREAM-INF:")) {
+            if (line.startsWith("#EXT-X-MEDIA:") && "AUDIO".equalsIgnoreCase(attr(line, "TYPE"))) {
+                String groupId = attr(line, "GROUP-ID");
+                String uri = attr(line, "URI");
+                if (!groupId.isEmpty() && !uri.isEmpty()) {
+                    audioRenditions.add(new AudioRendition(
+                            groupId,
+                            resolve(url, uri),
+                            attr(line, "NAME"),
+                            "YES".equalsIgnoreCase(attr(line, "DEFAULT")),
+                            "YES".equalsIgnoreCase(attr(line, "AUTOSELECT"))));
+                }
+            } else if (line.startsWith("#EXT-X-STREAM-INF:")) {
                 long bandwidth = parseLongAttr(line, "BANDWIDTH", 0);
-                String resolution = parseStringAttr(line, "RESOLUTION");
+                String resolution = attr(line, "RESOLUTION");
+                String audioGroup = attr(line, "AUDIO");
                 int j = i + 1;
                 while (j < lines.length && (lines[j].trim().isEmpty() || lines[j].trim().startsWith("#"))) j++;
-                if (j < lines.length) variants.add(new Variant(resolve(url, lines[j].trim()), bandwidth, resolution));
+                if (j < lines.length) {
+                    variants.add(new Variant(resolve(url, lines[j].trim()), bandwidth, resolution, audioGroup));
+                }
             }
         }
+
         if (!variants.isEmpty()) {
             variants.sort((a, b) -> Long.compare(b.bandwidth, a.bandwidth));
             Variant chosen = variants.get(0);
-            updateProgress(-1, "检测到主播放列表，选择最高码率" + (chosen.resolution.isEmpty() ? "" : "（" + chosen.resolution + "）") + "…");
-            return loadRemotePlaylist(chosen.url, depth + 1);
+            updateProgress(-1, "检测到主播放列表，选择最高码率"
+                    + (chosen.resolution.isEmpty() ? "" : "（" + chosen.resolution + "）") + "…");
+            MediaPlaylist selected = loadRemotePlaylist(chosen.url, depth + 1);
+            if ((selected.audioPlaylistUrl == null || selected.audioPlaylistUrl.isEmpty()) && !chosen.audioGroup.isEmpty()) {
+                AudioRendition best = chooseAudioRendition(audioRenditions, chosen.audioGroup);
+                if (best != null) {
+                    selected.audioPlaylistUrl = best.url;
+                    selected.audioName = best.name;
+                }
+            }
+            return selected;
         }
 
         MediaPlaylist result = new MediaPlaylist();
@@ -426,16 +488,15 @@ public class ConverterService extends Service {
             if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
                 try { result.mediaSequence = Long.parseLong(line.substring(line.indexOf(':') + 1).trim()); } catch (Exception ignored) {}
             } else if (line.startsWith("#EXT-X-MAP:")) {
-                String uri = parseStringAttr(line, "URI");
+                String uri = attr(line, "URI");
                 if (!uri.isEmpty()) result.initUrl = resolve(url, uri);
             } else if (line.startsWith("#EXT-X-KEY:")) {
-                String method = parseStringAttr(line, "METHOD");
-                if (method.isEmpty()) method = parseBareAttr(line, "METHOD");
+                String method = attr(line, "METHOD");
                 if ("NONE".equalsIgnoreCase(method)) currentKey = null;
                 else if ("AES-128".equalsIgnoreCase(method)) {
-                    String uri = parseStringAttr(line, "URI");
+                    String uri = attr(line, "URI");
                     if (uri.isEmpty()) throw new IOException("AES-128 密钥缺少 URI。");
-                    currentKey = new KeySpec(resolve(url, uri), parseBareAttr(line, "IV"));
+                    currentKey = new KeySpec(resolve(url, uri), attr(line, "IV"));
                 } else if (!method.isEmpty()) {
                     throw new IOException("不支持的加密方式：" + method + "。SAMPLE-AES/DRM 无法转换。");
                 }
@@ -450,6 +511,18 @@ public class ConverterService extends Service {
             }
         }
         return result;
+    }
+
+    private AudioRendition chooseAudioRendition(List<AudioRendition> list, String groupId) {
+        AudioRendition fallback = null;
+        AudioRendition auto = null;
+        for (AudioRendition a : list) {
+            if (!groupId.equals(a.groupId)) continue;
+            if (fallback == null) fallback = a;
+            if (a.isDefault) return a;
+            if (auto == null && a.autoSelect) auto = a;
+        }
+        return auto != null ? auto : fallback;
     }
 
     private byte[] decryptRemote(byte[] encrypted, KeySpec spec, long sequence, Map<String, byte[]> cache) throws Exception {
@@ -491,6 +564,84 @@ public class ConverterService extends Service {
         if (looksLikeTs(data)) return false;
         if (looksLikeMp4(data)) return true;
         throw new IOException("无法识别分片格式：既不像 MPEG-TS，也不像分段 MP4。");
+    }
+
+    private void muxSeparateAv(File videoInput, File audioInput, File output) throws Exception {
+        MediaExtractor videoExtractor = new MediaExtractor();
+        MediaExtractor audioExtractor = new MediaExtractor();
+        MediaMuxer muxer = null;
+        boolean started = false;
+        try {
+            videoExtractor.setDataSource(videoInput.getAbsolutePath());
+            audioExtractor.setDataSource(audioInput.getAbsolutePath());
+            int videoTrack = findTrack(videoExtractor, "video/");
+            int audioTrack = findTrack(audioExtractor, "audio/");
+            if (videoTrack < 0) throw new IOException("独立视频源中没有找到视频轨。");
+            if (audioTrack < 0) throw new IOException("独立音频源中没有找到音频轨。");
+
+            MediaFormat videoFormat = videoExtractor.getTrackFormat(videoTrack);
+            MediaFormat audioFormat = audioExtractor.getTrackFormat(audioTrack);
+            videoExtractor.selectTrack(videoTrack);
+            audioExtractor.selectTrack(audioTrack);
+
+            muxer = new MediaMuxer(output.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            int outVideo = muxer.addTrack(videoFormat);
+            int outAudio = muxer.addTrack(audioFormat);
+            muxer.start();
+            started = true;
+
+            long videoStart = Math.max(0, videoExtractor.getSampleTime());
+            long audioStart = Math.max(0, audioExtractor.getSampleTime());
+            long basePts = Math.min(videoStart, audioStart);
+            int maxInput = 1024 * 1024;
+            if (videoFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE))
+                maxInput = Math.max(maxInput, videoFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE));
+            if (audioFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE))
+                maxInput = Math.max(maxInput, audioFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE));
+            int bufferSize = Math.min(Math.max(maxInput, 1024 * 1024), 16 * 1024 * 1024);
+
+            copyOneTrack(videoExtractor, muxer, outVideo, basePts, bufferSize);
+            copyOneTrack(audioExtractor, muxer, outAudio, basePts, bufferSize);
+        } finally {
+            try { videoExtractor.release(); } catch (Exception ignored) {}
+            try { audioExtractor.release(); } catch (Exception ignored) {}
+            if (muxer != null) {
+                try { if (started) muxer.stop(); }
+                catch (Exception e) { if (output.exists()) output.delete(); throw e; }
+                finally { try { muxer.release(); } catch (Exception ignored) {} }
+            }
+        }
+        if (!output.exists() || output.length() < 1024) throw new IOException("独立音视频合并失败。");
+    }
+
+    private int findTrack(MediaExtractor extractor, String mimePrefix) {
+        for (int i = 0; i < extractor.getTrackCount(); i++) {
+            MediaFormat format = extractor.getTrackFormat(i);
+            String mime = format.getString(MediaFormat.KEY_MIME);
+            if (mime != null && mime.startsWith(mimePrefix)) return i;
+        }
+        return -1;
+    }
+
+    private void copyOneTrack(MediaExtractor extractor, MediaMuxer muxer, int outTrack,
+                              long basePts, int bufferSize) throws Exception {
+        ByteBuffer buffer = ByteBuffer.allocateDirect(bufferSize);
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        long lastPts = -1;
+        while (true) {
+            checkCancelled();
+            buffer.clear();
+            int size = extractor.readSampleData(buffer, 0);
+            if (size < 0) break;
+            long pts = extractor.getSampleTime();
+            if (pts < 0) pts = lastPts < 0 ? 0 : lastPts + 1;
+            else pts = Math.max(0, pts - basePts);
+            if (lastPts >= 0 && pts <= lastPts) pts = lastPts + 1;
+            lastPts = pts;
+            info.set(0, size, pts, extractor.getSampleFlags());
+            muxer.writeSampleData(outTrack, buffer, info);
+            if (!extractor.advance()) break;
+        }
     }
 
     private void remuxTsToMp4(File input, File output) throws Exception {
@@ -810,11 +961,13 @@ public class ConverterService extends Service {
     private static String nvl(String s) { return s == null ? "" : s; }
     private static String parseStringAttr(String line, String key) { Matcher m = Pattern.compile("(?:^|[,\\:])" + Pattern.quote(key) + "=\\\"([^\\\"]*)\\\"").matcher(line); return m.find() ? m.group(1) : ""; }
     private static String parseBareAttr(String line, String key) { Matcher m = Pattern.compile("(?:^|[,\\:])" + Pattern.quote(key) + "=([^,]*)").matcher(line); return m.find() ? m.group(1).trim().replace("\"", "") : ""; }
-    private static long parseLongAttr(String line, String key, long fallback) { try { return Long.parseLong(parseBareAttr(line, key)); } catch (Exception e) { return fallback; } }
+    private static String attr(String line, String key) { String v = parseStringAttr(line, key); return v.isEmpty() ? parseBareAttr(line, key) : v; }
+    private static long parseLongAttr(String line, String key, long fallback) { try { return Long.parseLong(attr(line, key)); } catch (Exception e) { return fallback; } }
     private static byte[] sequenceIv(long n) { byte[] iv = new byte[16]; for (int i = 15; i >= 0; i--) { iv[i] = (byte) (n & 0xff); n >>>= 8; } return iv; }
     private static byte[] parseIv(String s) throws IOException { s = s.trim(); if (s.startsWith("0x") || s.startsWith("0X")) s = s.substring(2); if (s.length() > 32) throw new IOException("AES IV 长度异常。"); while (s.length() < 32) s = "0" + s; byte[] out = new byte[16]; try { for (int i = 0; i < 16; i++) out[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16); } catch (Exception e) { throw new IOException("AES IV 格式错误。"); } return out; }
     private static boolean looksLikeTs(byte[] b) { int limit = Math.min(b.length - 376, 2048); for (int i = 0; i <= limit; i++) if ((b[i] & 255) == 0x47 && (b[i + 188] & 255) == 0x47 && (b[i + 376] & 255) == 0x47) return true; return b.length > 0 && (b[0] & 255) == 0x47; }
     private static boolean looksLikeMp4(byte[] b) { return containsBox(b, "ftyp") || containsBox(b, "styp") || containsBox(b, "moof") || containsBox(b, "moov"); }
+    private static boolean looksLikePackedAudio(byte[] b) { int max = Math.min(b.length - 1, 65536); for (int i = 0; i < max; i++) { int x = b[i] & 255, y = b[i + 1] & 255; if (x == 0xFF && (y & 0xF6) == 0xF0) return true; } return b.length >= 3 && b[0] == 'I' && b[1] == 'D' && b[2] == '3'; }
     private static boolean containsBox(byte[] b, String type) { byte[] t = type.getBytes(StandardCharsets.US_ASCII); int max = Math.min(b.length - 4, 1024 * 1024); for (int i = 4; i <= max; i++) if (b[i] == t[0] && b[i+1] == t[1] && b[i+2] == t[2] && b[i+3] == t[3]) return true; return false; }
     private static boolean fileContainsBox(File f, String type) throws IOException { return containsBox(readHead(f, 1024 * 1024), type); }
     private static long be32(byte[] b, int p) { return ((long)(b[p] & 255) << 24) | ((long)(b[p+1] & 255) << 16) | ((long)(b[p+2] & 255) << 8) | (b[p+3] & 255L); }
@@ -836,8 +989,9 @@ public class ConverterService extends Service {
     @Override public IBinder onBind(Intent intent) { return null; }
     @Override public void onDestroy() { cancelled = true; super.onDestroy(); }
 
-    private static class Variant { String url, resolution; long bandwidth; Variant(String u,long b,String r){url=u;bandwidth=b;resolution=r==null?"":r;} }
-    private static class MediaPlaylist { String sourceUrl, initUrl; long mediaSequence; boolean endList, hasByteRange; List<Segment> segments = new ArrayList<>(); }
+    private static class Variant { String url, resolution, audioGroup; long bandwidth; Variant(String u,long b,String r,String a){url=u;bandwidth=b;resolution=r==null?"":r;audioGroup=a==null?"":a;} }
+    private static class AudioRendition { String groupId,url,name; boolean isDefault,autoSelect; AudioRendition(String g,String u,String n,boolean d,boolean a){groupId=g;url=u;name=n==null?"":n;isDefault=d;autoSelect=a;} }
+    private static class MediaPlaylist { String sourceUrl, initUrl, audioPlaylistUrl, audioName; long mediaSequence; boolean endList, hasByteRange; List<Segment> segments = new ArrayList<>(); }
     private static class Segment { String url; double duration; KeySpec key; Segment(String u,double d,KeySpec k){url=u;duration=d;key=k;} }
     private static class KeySpec { String url, iv; KeySpec(String u,String i){url=u;iv=i==null?"":i;} KeySpec copy(){return new KeySpec(url,iv);} }
     private static class LocalVariant { String path; long bandwidth; LocalVariant(String p,long b){path=p;bandwidth=b;} }
