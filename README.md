@@ -37,3 +37,21 @@ GitHub Actions 会在推送到 `main`、提交 Pull Request 或手动触发时�
 ## 签名说明
 
 当前工作流每次构建都会生成临时测试证书，适合个人测试，但不同构建之间不能作为同一签名的更新包互相覆盖安装。正式长期使用时，应把固定 keystore 保存为 GitHub Actions Secret，并让工作流使用该固定证书；不要把正式签名私钥提交到公开仓库。
+
+
+## 固定 Release 签名
+
+从 **v4.1** 开始，Release APK 使用固定签名密钥，不再由 CI 临时生成证书。
+
+GitHub Actions 需要配置以下 Repository Secrets：
+
+- `ANDROID_RELEASE_KEYSTORE_BASE64`
+- `ANDROID_RELEASE_KEYSTORE_PASSWORD`
+
+签名别名固定为 `m3u8zipmp4`。
+
+正式签名证书 SHA-256：
+
+`98:FB:72:37:4A:3E:C0:CB:3B:C1:9E:55:3A:44:6B:A5:4E:0A:3E:9D:5D:3A:AF:99:03:76:65:E4:60:09:07:95`
+
+> keystore 私钥不得提交到公开仓库。请离线保留备份；丢失后将无法继续给已经安装正式签名版本的用户做覆盖升级。
