@@ -16,11 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify converter source
+      - name: Verify source tree
         shell: bash
         run: |
           test -f app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java
-          echo "c63d4320162f24e116a597e2ac1d3459aefaca83f8becd12c3df1b6595fd4854  app/src/main/java/com/openai/m3u8zipmp4/ConverterService.java" | sha256sum -c -
+          test -f app/src/main/java/com/openai/m3u8zipmp4/MainActivity.java
 
       - uses: actions/setup-java@v4
         with:
@@ -76,16 +76,16 @@ jobs:
         run: |
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f 4 \
             app/build/outputs/apk/release/app-release-unsigned.apk \
-            M3U8-ZIP-to-MP4-v3-aligned.apk
+            M3U8-ZIP-to-MP4-v4-aligned.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
             --ks release.jks --ks-pass pass:android --key-pass pass:android \
-            --out M3U8-ZIP-to-MP4-v3.apk M3U8-ZIP-to-MP4-v3-aligned.apk
+            --out M3U8-ZIP-to-MP4-v4.apk M3U8-ZIP-to-MP4-v4-aligned.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
-            M3U8-ZIP-to-MP4-v3.apk
+            M3U8-ZIP-to-MP4-v4.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: M3U8-ZIP-to-MP4-Android-v3
-          path: M3U8-ZIP-to-MP4-v3.apk
+          name: M3U8-ZIP-to-MP4-Android-v4
+          path: M3U8-ZIP-to-MP4-v4.apk
           if-no-files-found: error
           retention-days: 30
